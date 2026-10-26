@@ -546,6 +546,77 @@ def create_mcp_server(app=None):
                             raise RuntimeError(f"{stage_label} failed: {evt.get('error') or evt}")
         return None
 
+    async def _ingest_dub_source(url: str | None, video_path: str | None, source_lang: str | None) -> tuple[str, str | None]:
+        """Ingest remote URL or local video file, returning (job_id, task_id)."""
+        if url:
+            payload: dict[str, Any] = {"url": url, "fetch_subs": True}
+            if source_lang and source_lang.lower() != "auto":
+                payload["source_lang"] = source_lang
+            r = await _api_post_json("/dub/ingest-url", payload)
+            return r.get("job_id"), r.get("task_id")
+
+        confined_path = _resolve_under_base(video_path or "")
+        if not os.path.isfile(confined_path):
+            raise FileNotFoundError(f"Local video file not found: {video_path}")
+        with open(confined_path, "rb") as f:
+            r = await _api_post_form(
+                "/dub/upload",
+                data={"source_lang": source_lang or "Auto"},
+                files={"file": (os.path.basename(confined_path), f, "video/mp4")},
+                timeout=300.0,
+            )
+            data = r.json()
+            return data.get("job_id"), data.get("task_id")
+
+    async def _resolve_dub_segments(job_id: str) -> list[dict]:
+        """Fetch timed cues from downloaded captions, cleaned segments, or job store."""
+        try:
+            c_resp = await _api_post_json(f"/dub/use-downloaded-captions/{job_id}", {})
+            segments = c_resp.get("segments") or []
+        except Exception:
+            segments = []
+
+        if not segments:
+            cl_resp = await _api_post_json(f"/dub/cleanup-segments/{job_id}", {})
+            segments = cl_resp.get("segments") or []
+
+        if not segments:
+            job_info = await _api_get(f"/jobs/{job_id}")
+            segments = job_info.get("segments") or []
+
+        return segments
+
+    async def _export_dub_artifact(
+        job_id: str,
+        target_code: str,
+        export_format: str,
+        preserve_bg: bool,
+        burn_subs: bool,
+    ) -> tuple[bytes, str, str]:
+        """Download rendered artifact and return (content_bytes, extension, endpoint_url)."""
+        import httpx
+
+        base = _api_base()
+        async with httpx.AsyncClient(base_url=base, timeout=1200.0) as client:
+            if export_format == "audio":
+                endpoint = f"/dub/download-audio/{job_id}"
+                params = {"lang": target_code, "preserve_bg": preserve_bg}
+                ext = "wav"
+            else:
+                endpoint = f"/dub/download/{job_id}"
+                params = {"lang": target_code, "preserve_bg": preserve_bg, "burn_subs": burn_subs}
+                ext = "mp4"
+
+            dl = await client.get(endpoint, params=params)
+            if dl.status_code != 200:
+                try:
+                    err_detail = dl.json()
+                except Exception:
+                    err_detail = dl.text
+                raise RuntimeError(f"Export failed with status {dl.status_code}: {err_detail}")
+
+            return dl.content, ext, endpoint
+
     # ── Tools ───────────────────────────────────────────────────────────
 
     def _current_client_id() -> str | None:
@@ -973,31 +1044,9 @@ def create_mcp_server(app=None):
             return json.dumps({"error": "Either 'url' or 'video_path' must be provided."})
 
         # 1. Ingest
-        job_id = None
-        task_id = None
         try:
-            if url:
-                payload = {"url": url, "fetch_subs": True}
-                if source_lang and source_lang.lower() != "auto":
-                    payload["source_lang"] = source_lang
-                r = await _api_post_json("/dub/ingest-url", payload)
-                job_id = r.get("job_id")
-                task_id = r.get("task_id")
-            else:
-                confined_path = _resolve_under_base(video_path)
-                if not os.path.isfile(confined_path):
-                    return json.dumps({"error": f"Local video file not found: {video_path}"})
-                with open(confined_path, "rb") as f:
-                    r = await _api_post_form(
-                        "/dub/upload",
-                        data={"source_lang": source_lang or "Auto"},
-                        files={"file": (os.path.basename(confined_path), f, "video/mp4")},
-                        timeout=300.0,
-                    )
-                    data = r.json()
-                    job_id = data.get("job_id")
-                    task_id = data.get("task_id")
-        except (httpx.HTTPError, ValueError, Exception) as exc:
+            job_id, task_id = await _ingest_dub_source(url, video_path, source_lang)
+        except Exception as exc:
             return json.dumps({"error": f"Video ingest failed: {exc}"})
 
         if not job_id:
@@ -1017,22 +1066,7 @@ def create_mcp_server(app=None):
 
         # 2. Retrieve cues / segments
         try:
-            # Check if downloaded captions exist, otherwise cleanup segments
-            try:
-                c_resp = await _api_post_json(f"/dub/use-downloaded-captions/{job_id}", {})
-                segments = c_resp.get("segments") or []
-            except Exception:
-                segments = []
-
-            if not segments:
-                cl_resp = await _api_post_json(f"/dub/cleanup-segments/{job_id}", {})
-                segments = cl_resp.get("segments") or []
-
-            if not segments:
-                # Fallback to checking job data directly
-                job_info = await _api_get(f"/jobs/{job_id}")
-                segments = job_info.get("segments") or []
-
+            segments = await _resolve_dub_segments(job_id)
             if not segments:
                 return json.dumps({"error": "No dialogue or subtitle segments found in the media."})
         except Exception as exc:
@@ -1104,30 +1138,14 @@ def create_mcp_server(app=None):
 
         # 5. Export result
         try:
-            base = _api_base()
             target_code = "vi" if target_lang.lower().startswith("vi") else "und"
-            async with httpx.AsyncClient(base_url=base, timeout=1200.0) as client:
-                if export_format == "audio":
-                    export_url = f"/dub/download-audio/{job_id}"
-                    dl = await client.get(export_url, params={"lang": target_code, "preserve_bg": preserve_bg})
-                    ext = "wav"
-                else:
-                    export_url = f"/dub/download/{job_id}"
-                    dl = await client.get(export_url, params={
-                        "lang": target_code,
-                        "preserve_bg": preserve_bg,
-                        "burn_subs": burn_subs,
-                    })
-                    ext = "mp4"
-
-                if dl.status_code != 200:
-                    try:
-                        err_detail = dl.json()
-                    except Exception:
-                        err_detail = dl.text
-                    return json.dumps({"error": f"Export failed with status {dl.status_code}: {err_detail}"})
-
-                output_bytes = dl.content
+            output_bytes, ext, export_url = await _export_dub_artifact(
+                job_id=job_id,
+                target_code=target_code,
+                export_format=export_format,
+                preserve_bg=preserve_bg,
+                burn_subs=burn_subs,
+            )
 
             # Write file into base path or job directory
             base_p = _base_path()
