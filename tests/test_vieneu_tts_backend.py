@@ -122,6 +122,34 @@ def test_vieneu_generate_posts_openai_speech_request(monkeypatch):
     }
 
 
+def test_vieneu_generate_forwards_ref_audio_clone(monkeypatch, tmp_path):
+    import base64
+    from services import outbound_http
+    from services.tts_backend import VieNeuTTSBackend
+
+    captured = []
+    wav_bytes = _minimal_wav_24k()
+    ref_file = tmp_path / "ref.wav"
+    dummy_audio = b"RIFF1234WAVE"
+    ref_file.write_bytes(dummy_audio)
+
+    def fake_open(url, **kw):
+        captured.append((url, kw, json.loads(kw["body"].decode("utf-8"))))
+        return _ByteResponse(wav_bytes)
+
+    monkeypatch.setenv("OMNIVOICE_VIENEU_URL", "http://127.0.0.1:8004")
+    monkeypatch.setattr(outbound_http, "open_trusted_endpoint", fake_open)
+
+    backend = VieNeuTTSBackend()
+    wav = backend.generate("Xin chào", language="vi", ref_audio=str(ref_file))
+
+    assert wav.shape == (1, 1)
+    assert len(captured) == 1
+    _url, _kw, body = captured[0]
+    expected_b64 = base64.b64encode(dummy_audio).decode("utf-8")
+    assert body.get("ref_audio_base64") == expected_b64
+
+
 def test_vieneu_rejects_empty_and_unsupported_language(monkeypatch):
     from services import outbound_http
     from services.tts_backend import TTSInputError, VieNeuTTSBackend

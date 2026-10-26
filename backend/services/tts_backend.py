@@ -3430,6 +3430,7 @@ class VieNeuTTSBackend(TTSBackend):
                 "VieNeu-TTS: the input contains no speakable text — send at least one word."
             )
 
+        import base64
         import io
         import json
         import torchaudio
@@ -3445,15 +3446,29 @@ class VieNeuTTSBackend(TTSBackend):
         api_key = (os.environ.get("OMNIVOICE_VIENEU_API_KEY") or "").strip()
         auth = f"Bearer {api_key}" if api_key else None
 
+        ref_audio_b64 = None
+        ref_audio_path = kw.get("ref_audio")
+        if ref_audio_path and os.path.isfile(str(ref_audio_path)):
+            try:
+                with open(str(ref_audio_path), "rb") as rf:
+                    ref_bytes = rf.read()
+                if ref_bytes:
+                    ref_audio_b64 = base64.b64encode(ref_bytes).decode("utf-8")
+            except Exception as e:
+                logger.warning("Failed to encode ref_audio for VieNeu-TTS: %s", e)
+
         wavs: list[torch.Tensor] = []
         for chunk in chunks:
-            body = {
+            body: dict[str, Any] = {
                 "model": "vieneu-v3-turbo",
                 "input": chunk,
                 "voice": voice,
                 "response_format": "wav",
                 "speed": speed,
             }
+            if ref_audio_b64:
+                body["ref_audio_base64"] = ref_audio_b64
+
             try:
                 with open_trusted_endpoint(
                     url,
