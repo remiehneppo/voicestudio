@@ -13,6 +13,7 @@ Tools exposed:
     list_languages    — available TTS languages
     list_personalities — voice personality presets
     check_health      — backend status + active GPU device
+    dub_video         — video URL / path → translated, voiced and burned MP4 / WAV
 
 Resources exposed:
     voice://{profile_id}  — voice profile metadata
@@ -40,6 +41,7 @@ import os
 import re
 import stat
 import sys
+from typing import Literal
 
 logger = logging.getLogger("omnivoice.mcp")
 
@@ -521,6 +523,29 @@ def create_mcp_server(app=None):
             r.raise_for_status()
             return r.json()
 
+    async def _wait_for_task_stream(
+        task_id: str,
+        *,
+        terminal_events: tuple[str, ...],
+        timeout: float,
+        stage_label: str,
+    ) -> dict | None:
+        """Stream an async backend task to completion, returning the terminal event payload."""
+        import httpx
+
+        base = _api_base()
+        async with httpx.AsyncClient(base_url=base, timeout=timeout) as client:
+            async with client.stream("GET", f"/tasks/stream/{task_id}") as stream:
+                async for line in stream.aiter_lines():
+                    if line.startswith("data: "):
+                        evt = json.loads(line[6:])
+                        etype = evt.get("type")
+                        if etype in terminal_events:
+                            return evt
+                        if etype == "error":
+                            raise RuntimeError(f"{stage_label} failed: {evt.get('error') or evt}")
+        return None
+
     # ── Tools ───────────────────────────────────────────────────────────
 
     def _current_client_id() -> str | None:
@@ -892,6 +917,243 @@ def create_mcp_server(app=None):
             "attrs": parsed["attrs"],
             "unmatched": parsed.get("unmatched", []),
         })
+
+    @mcp.tool()
+    async def dub_video(
+        url: str | None = None,
+        video_path: str | None = None,
+        target_lang: str = "Vietnamese",
+        source_lang: str | None = None,
+        translation_provider: Literal["openai", "argos", "google", "nllb"] = "openai",
+        timing_strategy: Literal["strict_slot", "concise", "stretch_video", "smart_fit"] = "strict_slot",
+        burn_subs: bool = True,
+        preserve_bg: bool = False,
+        max_segments: int | None = None,
+        export_format: Literal["video", "audio"] = "video",
+    ) -> str:
+        """Dub a video or audio file into another language using VoiceStudio's dubbing pipeline.
+
+        Executes the complete video dubbing lifecycle:
+        1. Ingest: downloads remote YouTube/web URL via yt-dlp or links a local video/audio file.
+        2. Subtitle / Transcription: parses existing subtitles or runs ASR to extract timed cues.
+        3. Translation: translates segments into target_lang using LLM or local MT.
+        4. Synthesis: generates speech with the active TTS engine (e.g. VieNeu-TTS for Vietnamese).
+        5. Export: produces the final dubbed MP4 (with burned subtitles) or standalone audio.
+
+        Args:
+            url: Remote video/audio URL (e.g. YouTube). Provide either url OR video_path.
+            video_path: Path to a local video/audio file under OMNIVOICE_MCP_BASE_PATH.
+            target_lang: Language to translate and dub into (default: 'Vietnamese').
+            source_lang: Language of the original video (e.g. 'en', 'Auto'). Omit to auto-detect.
+            translation_provider: Translation engine: 'openai' (LLM, recommended), 'argos' (local offline),
+                'google', or 'nllb' (default: 'openai').
+            timing_strategy: Strategy to fit speech into timestamps:
+                - 'strict_slot': pitch-preserving fit to original line timing (recommended).
+                - 'concise': natural rate; fails if speech overflows available window.
+                - 'stretch_video': slows down video footage to match speech duration.
+                - 'smart_fit': hybrid audio speed-up + video slow-down.
+            burn_subs: If True, hard-burns translated subtitles directly into the exported video.
+            preserve_bg: If True, attempts to mix original background music/effects back in.
+                Set False (default) for long videos or if vocal isolation (Demucs) is skipped.
+            max_segments: Optional limit on the number of dialogue segments to dub (useful for testing previews).
+            export_format: 'video' (default) exports MP4 video; 'audio' exports WAV audio track.
+
+        Returns:
+            JSON string containing:
+            - job_id: Unique identifier of the dubbing job.
+            - target_lang: Dubbed language.
+            - segments_count: Number of dialogue lines translated and voiced.
+            - duration_s: Total media duration in seconds.
+            - output_path: Absolute filesystem path to the exported MP4/WAV file.
+            - download_url: Relative URL to stream or download the dubbed artifact from VoiceStudio.
+        """
+        import httpx
+
+        if not url and not video_path:
+            return json.dumps({"error": "Either 'url' or 'video_path' must be provided."})
+
+        # 1. Ingest
+        job_id = None
+        task_id = None
+        try:
+            if url:
+                payload = {"url": url, "fetch_subs": True}
+                if source_lang and source_lang.lower() != "auto":
+                    payload["source_lang"] = source_lang
+                r = await _api_post_json("/dub/ingest-url", payload)
+                job_id = r.get("job_id")
+                task_id = r.get("task_id")
+            else:
+                confined_path = _resolve_under_base(video_path)
+                if not os.path.isfile(confined_path):
+                    return json.dumps({"error": f"Local video file not found: {video_path}"})
+                with open(confined_path, "rb") as f:
+                    r = await _api_post_form(
+                        "/dub/upload",
+                        data={"source_lang": source_lang or "Auto"},
+                        files={"file": (os.path.basename(confined_path), f, "video/mp4")},
+                        timeout=300.0,
+                    )
+                    data = r.json()
+                    job_id = data.get("job_id")
+                    task_id = data.get("task_id")
+        except (httpx.HTTPError, ValueError, Exception) as exc:
+            return json.dumps({"error": f"Video ingest failed: {exc}"})
+
+        if not job_id:
+            return json.dumps({"error": "Failed to create dubbing job."})
+
+        # Wait for prep task if background ingest is running
+        if task_id:
+            try:
+                await _wait_for_task_stream(
+                    task_id,
+                    terminal_events=("done", "complete", "ready"),
+                    timeout=900.0,
+                    stage_label="Ingest preparation",
+                )
+            except Exception as exc:
+                return json.dumps({"error": str(exc)})
+
+        # 2. Retrieve cues / segments
+        try:
+            # Check if downloaded captions exist, otherwise cleanup segments
+            try:
+                c_resp = await _api_post_json(f"/dub/use-downloaded-captions/{job_id}", {})
+                segments = c_resp.get("segments") or []
+            except Exception:
+                segments = []
+
+            if not segments:
+                cl_resp = await _api_post_json(f"/dub/cleanup-segments/{job_id}", {})
+                segments = cl_resp.get("segments") or []
+
+            if not segments:
+                # Fallback to checking job data directly
+                job_info = await _api_get(f"/jobs/{job_id}")
+                segments = job_info.get("segments") or []
+
+            if not segments:
+                return json.dumps({"error": "No dialogue or subtitle segments found in the media."})
+        except Exception as exc:
+            return json.dumps({"error": f"Retrieving subtitle segments failed: {exc}"})
+
+        if max_segments and max_segments > 0:
+            segments = segments[:max_segments]
+
+        # 3. Translate segments
+        try:
+            tr_payload = {
+                "job_id": job_id,
+                "segments": [
+                    {
+                        "id": str(s.get("id")),
+                        "text": s.get("text") or s.get("text_original") or "",
+                        "start": s.get("start", 0.0),
+                        "end": s.get("end", 0.0),
+                        "speaker": s.get("speaker_id"),
+                    }
+                    for s in segments
+                ],
+                "target_lang": target_lang,
+                "source_lang": source_lang or "en",
+                "provider": translation_provider,
+            }
+            tr_resp = await _api_post_json("/dub/translate", tr_payload)
+            translated_list = tr_resp.get("translated") or []
+            tr_map = {str(item["id"]): item.get("text", "") for item in translated_list}
+        except Exception as exc:
+            return json.dumps({"error": f"Translation failed: {exc}"})
+
+        # 4. Generate TTS audio
+        gen_segments = []
+        seg_ids = []
+        for s in segments:
+            sid = str(s.get("id"))
+            seg_ids.append(sid)
+            gen_segments.append({
+                "start": s.get("start", 0.0),
+                "end": s.get("end", 0.0),
+                "text": tr_map.get(sid) or s.get("text", ""),
+                "text_original": s.get("text", ""),
+                "speaker_id": s.get("speaker_id", "Speaker 1"),
+            })
+
+        try:
+            gen_req = {
+                "segments": gen_segments,
+                "segment_ids": seg_ids,
+                "language": target_lang,
+                "language_code": "vi" if target_lang.lower().startswith("vi") else "und",
+                "timing_strategy": timing_strategy,
+                "bg_volume": 0.3 if preserve_bg else 0.0,
+            }
+            gen_resp = await _api_post_json(f"/dub/generate/{job_id}", gen_req)
+            gen_task_id = gen_resp.get("task_id")
+            if not gen_task_id:
+                return json.dumps({"error": f"Dub generation did not return a task id: {gen_resp}"})
+
+            await _wait_for_task_stream(
+                gen_task_id,
+                terminal_events=("done", "complete"),
+                timeout=1800.0,
+                stage_label="TTS dub synthesis",
+            )
+        except Exception as exc:
+            return json.dumps({"error": f"Dub synthesis execution failed: {exc}"})
+
+        # 5. Export result
+        try:
+            base = _api_base()
+            target_code = "vi" if target_lang.lower().startswith("vi") else "und"
+            async with httpx.AsyncClient(base_url=base, timeout=1200.0) as client:
+                if export_format == "audio":
+                    export_url = f"/dub/download-audio/{job_id}"
+                    dl = await client.get(export_url, params={"lang": target_code, "preserve_bg": preserve_bg})
+                    ext = "wav"
+                else:
+                    export_url = f"/dub/download/{job_id}"
+                    dl = await client.get(export_url, params={
+                        "lang": target_code,
+                        "preserve_bg": preserve_bg,
+                        "burn_subs": burn_subs,
+                    })
+                    ext = "mp4"
+
+                if dl.status_code != 200:
+                    try:
+                        err_detail = dl.json()
+                    except Exception:
+                        err_detail = dl.text
+                    return json.dumps({"error": f"Export failed with status {dl.status_code}: {err_detail}"})
+
+                output_bytes = dl.content
+
+            # Write file into base path or job directory
+            base_p = _base_path()
+            if base_p:
+                os.makedirs(base_p, exist_ok=True)
+                out_filename = f"dubbed_{target_code}_{job_id}.{ext}"
+                dest_path = os.path.join(base_p, out_filename)
+                with open(dest_path, "wb") as f:
+                    f.write(output_bytes)
+            else:
+                from core.config import DUB_DIR
+                dest_path = os.path.join(DUB_DIR, job_id, f"dubbed_{target_code}.{ext}")
+                with open(dest_path, "wb") as f:
+                    f.write(output_bytes)
+
+            return json.dumps({
+                "job_id": job_id,
+                "target_lang": target_lang,
+                "segments_count": len(gen_segments),
+                "output_path": dest_path,
+                "download_url": f"{export_url}?lang={target_code}",
+                "file_size_bytes": len(output_bytes),
+                "format": ext,
+            })
+        except Exception as exc:
+            return json.dumps({"error": f"Exporting dubbed media failed: {exc}"})
 
     return mcp
 

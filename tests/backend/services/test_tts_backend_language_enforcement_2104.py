@@ -303,6 +303,7 @@ def test_batch_validates_all_languages_before_first_generation(_StubBackend):
     ("services.tts_backend", "KittenTTSBackend"),
     ("services.tts_backend", "CosyVoiceBackend"),
     ("services.tts_backend", "GPTSoVITSBackend"),
+    ("services.tts_backend", "VieNeuTTSBackend"),
     ("engines.confucius4", "Confucius4Backend"),
     ("engines.audiocpp", "AudioCPPBackend"),
     ("engines.indextts", "IndexTTS2Backend"),

@@ -1438,10 +1438,9 @@ class MLXWhisperBackend(ASRBackend):
 
 class PyTorchWhisperBackend(ASRBackend):
     id = "pytorch-whisper"
-    display_name = "PyTorch Whisper (CUDA / CPU via transformers pipeline)"
-    # Pure transformers pipeline → runs wherever torch does (CUDA, MPS, CPU).
-    # ROCm-via-HIP would also work but is left unclaimed pending verification.
-    gpu_compat = ("cuda", "mps", "cpu")
+    display_name = "PyTorch Whisper (CUDA / ROCm / CPU via transformers pipeline)"
+    # Pure transformers pipeline → runs wherever torch does (CUDA, ROCm, MPS, CPU).
+    gpu_compat = ("cuda", "rocm", "mps", "cpu")
 
     def __init__(self, asr_pipe=None):
         # Reuses the `_asr_pipe` attached to the TTS model when available.

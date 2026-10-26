@@ -14,6 +14,7 @@ start once VoiceStudio is open.
 | `clone_voice` | reference audio (base64, or a `ref_audio_path` under the base path) → new voice profile. Returns a `profile_id` for use with `generate_speech`. |
 | `describe_voice` | free-text voice description → the voice-design attributes it maps to (gender, age, pitch, style, accent), plus the words it couldn't map. Saves nothing. |
 | `design_voice` | voice description → new **design** voice profile with a stable identity: its fixed-seed sample renders at save time, or on first use if the voice engine isn't ready yet. Returns a `profile_id` for use with `generate_speech`. Refuses a description that maps to no attribute. |
+| `dub_video` | remote URL (YouTube/web) or local video file → full dubbing lifecycle (transcription/cues, translation, TTS speech synthesis via active engine like VieNeu-TTS, timing fitting, subtitle burn-in) → final dubbed MP4 video or WAV audio. |
 | `transcribe` | audio (base64, or an `audio_path` under the base path) → text (646 languages). |
 | `list_voices` / `list_personalities` / `list_languages` | enumerate what's available. |
 | `check_health` | backend status + active GPU device. |

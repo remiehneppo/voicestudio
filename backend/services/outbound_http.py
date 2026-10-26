@@ -74,7 +74,12 @@ def resolve_trusted_endpoint(url: str) -> ResolvedEndpoint:
 # sub-path; requests that do name a sub-path must pick from this allowlist
 # so a misconfigured caller cannot route an arbitrary path at a trusted
 # origin. Add new entries only with a documented, well-known inference route.
-_ALLOWED_SUBPATHS: frozenset[str] = frozenset({"tts"})
+_ALLOWED_SUBPATHS: frozenset[str] = frozenset({
+    "tts",
+    "health",
+    "v1/voices",
+    "v1/audio/speech",
+})
 
 
 def _endpoint_path(requested_path: str) -> str:
@@ -122,6 +127,7 @@ def open_trusted_endpoint(
     path: str = "",
     body: bytes | None = None,
     content_type: str | None = None,
+    authorization: str | None = None,
     allowed_statuses: Collection[int] = frozenset(),
 ) -> http.client.HTTPResponse:
     """Open one request without redirects, pinned to the validated DNS answer.
@@ -154,6 +160,8 @@ def open_trusted_endpoint(
         # sees a well-formed request with the announced content type.
         headers["Content-Type"] = content_type
         headers["Content-Length"] = str(len(body) if body is not None else 0)
+    if authorization:
+        headers["Authorization"] = authorization
     # Let http.client format the authority from the validated host and port.
     # Supplying the hostname ourselves drops non-default ports and IPv6
     # brackets, which can make Host-aware inference servers misroute requests.

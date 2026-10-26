@@ -28,6 +28,7 @@ Engine availability depends on installed models, hardware, and configured provid
 - VoxCPM2
 - MOSS-TTS-Nano
 - gpt-sovits
+- vieneu-tts — [Guide](engines/vieneu-tts.md)
 - sherpa-onnx
 - **IndexTTS 2.5** ⚡ — [Guide](engines/indextts.md)
 - omnivoice-gguf

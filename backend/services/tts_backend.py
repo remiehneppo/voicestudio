@@ -3201,6 +3201,288 @@ class GPTSoVITSBackend(TTSBackend):
         return wav
 
 
+# ── VieNeu-TTS v3 Turbo adapter (Vietnamese OpenAI-compatible server) ──────
+
+
+class VieNeuTTSBackend(TTSBackend):
+    """VieNeu-TTS v3 Turbo — Vietnamese-optimized local TTS server (OpenAI API).
+
+    Connects to a local ``server-vieneu-tts-v3-turbo`` instance exposing
+    ``GET /health``, ``GET /v1/voices``, and ``POST /v1/audio/speech`` on
+    port 8004 by default.
+
+    Configuration environment variables:
+      • ``OMNIVOICE_VIENEU_URL``     — server origin (default: ``http://127.0.0.1:8004``)
+      • ``OMNIVOICE_VIENEU_VOICE``   — default voice (default: ``Thục Đoan``)
+      • ``OMNIVOICE_VIENEU_API_KEY`` — optional bearer token (``TTS_API_KEY``)
+    """
+
+    id = "vieneu-tts"
+    display_name = "VieNeu-TTS v3 Turbo (Vietnamese, 25 voices, OpenAI API)"
+    supports_voice_design = False
+    supports_cloning = True
+    gpu_compat = ("cuda", "rocm", "cpu")
+    language_display_names = {"vi": "Vietnamese", "en": "English"}
+
+    PRESET_VOICES = [
+        "Thục Đoan",
+        "Adam bựa",
+        "Trúc Ly",
+        "Anh Khôi",
+        "Mai Anh",
+        "Minh Quân Pro",
+        "Thùy Dung",
+        "Thiền Tâm Đức",
+        "Ngọc Huyền",
+        "Quang Sơn",
+        "Ngọc Trân",
+        "Minh Đức",
+        "Phạm Tuyên",
+        "Thái Sơn",
+        "Xuân Vĩnh",
+        "Thanh Bình",
+        "Ngọc Linh",
+        "Đoan Trang",
+        "Minh Triết",
+        "Mỹ Duyên",
+        "Quỳnh Anh",
+        "Đức Trí",
+        "Kim Thanh",
+        "Adam",
+        "Mạnh Dũng",
+    ]
+    DEFAULT_VOICE = "Thục Đoan"
+
+    _VOICE_ALIASES = {
+        "thuc_doan": "Thục Đoan",
+        "thuc doan": "Thục Đoan",
+        "thục đoan (nữ - miền nam)": "Thục Đoan",
+        "adam_bua": "Adam bựa",
+        "adam bua": "Adam bựa",
+        "truc_ly": "Trúc Ly",
+        "truc ly": "Trúc Ly",
+        "anh_khoi": "Anh Khôi",
+        "anh khoi": "Anh Khôi",
+        "mai_anh": "Mai Anh",
+        "mai anh": "Mai Anh",
+        "bich_ngoc": "Mai Anh",
+        "bích ngọc": "Mai Anh",
+        "minh_quan_pro": "Minh Quân Pro",
+        "minh quan pro": "Minh Quân Pro",
+        "hai_dang": "Minh Quân Pro",
+        "hải đăng": "Minh Quân Pro",
+        "thuy_dung": "Thùy Dung",
+        "thuy dung": "Thùy Dung",
+        "thien_tam_duc": "Thiền Tâm Đức",
+        "thien tam duc": "Thiền Tâm Đức",
+        "ngoc_huyen": "Ngọc Huyền",
+        "ngoc huyen": "Ngọc Huyền",
+        "quang_son": "Quang Sơn",
+        "quang son": "Quang Sơn",
+        "ngoc_tran": "Ngọc Trân",
+        "ngoc tran": "Ngọc Trân",
+        "minh_duc": "Minh Đức",
+        "minh duc": "Minh Đức",
+        "pham_tuyen": "Phạm Tuyên",
+        "pham tuyen": "Phạm Tuyên",
+        "thai_son": "Thái Sơn",
+        "thai son": "Thái Sơn",
+        "xuan_vinh": "Xuân Vĩnh",
+        "xuan vinh": "Xuân Vĩnh",
+        "thanh_binh": "Thanh Bình",
+        "thanh binh": "Thanh Bình",
+        "ngoc_linh": "Ngọc Linh",
+        "ngoc linh": "Ngọc Linh",
+        "doan_trang": "Đoan Trang",
+        "doan trang": "Đoan Trang",
+        "minh_triet": "Minh Triết",
+        "minh triet": "Minh Triết",
+        "my_duyen": "Mỹ Duyên",
+        "my duyen": "Mỹ Duyên",
+        "quynh_anh": "Quỳnh Anh",
+        "quynh anh": "Quỳnh Anh",
+        "duc_tri": "Đức Trí",
+        "duc tri": "Đức Trí",
+        "kim_thanh": "Kim Thanh",
+        "kim thanh": "Kim Thanh",
+        "adam": "Adam",
+        "manh_dung": "Mạnh Dũng",
+        "manh dung": "Mạnh Dũng",
+    }
+
+    _MAX_CHARS_PER_CHUNK = 1800
+
+    @staticmethod
+    def _resolve_origin() -> str:
+        raw = (os.environ.get("OMNIVOICE_VIENEU_URL") or "http://127.0.0.1:8004").strip().rstrip("/")
+        for suffix in ("/v1/audio/speech", "/v1/voices", "/v1", "/tts", "/health"):
+            if raw.endswith(suffix):
+                raw = raw[: -len(suffix)].rstrip("/")
+                break
+        return raw or "http://127.0.0.1:8004"
+
+    @classmethod
+    def is_available(cls) -> tuple[bool, str]:
+        from services.outbound_http import EndpointHTTPError, open_trusted_endpoint
+
+        url = cls._resolve_origin()
+        api_key = (os.environ.get("OMNIVOICE_VIENEU_API_KEY") or "").strip()
+        auth = f"Bearer {api_key}" if api_key else None
+        try:
+            with open_trusted_endpoint(
+                url,
+                method="GET",
+                path="health",
+                timeout=2,
+                authorization=auth,
+            ):
+                pass
+            return True, "ready (VieNeu server reachable)"
+        except EndpointHTTPError as exc:
+            return False, (
+                f"VieNeu TTS server at {url} returned HTTP {exc.status}. "
+                "Check the server logs and OMNIVOICE_VIENEU_URL configuration."
+            )
+        except Exception:
+            return False, (
+                f"VieNeu TTS server not reachable at {url}. "
+                "Start server-vieneu-tts-v3-turbo on port 8004 or set OMNIVOICE_VIENEU_URL."
+            )
+
+    @property
+    def sample_rate(self) -> int:
+        return 24000
+
+    @property
+    def supported_languages(self) -> list[str]:
+        return ["vi", "en"]
+
+    @classmethod
+    def _resolve_voice_name(
+        cls,
+        voice: Optional[str],
+        *,
+        instruct: Optional[str] = None,
+    ) -> str:
+        env_default = (os.environ.get("OMNIVOICE_VIENEU_VOICE") or "").strip()
+        for candidate in (voice, env_default):
+            if not candidate:
+                continue
+            cleaned = candidate.strip()
+            if cleaned in cls.PRESET_VOICES:
+                return cleaned
+            key = " ".join(cleaned.casefold().replace("_", " ").split())
+            if key in cls._VOICE_ALIASES:
+                return cls._VOICE_ALIASES[key]
+            for preset in cls.PRESET_VOICES:
+                if preset.casefold() == key:
+                    return preset
+        if instruct:
+            low = instruct.casefold()
+            if "male" in low and "female" not in low:
+                return "Minh Quân Pro"
+            if "female" in low:
+                return cls.DEFAULT_VOICE
+        return cls.DEFAULT_VOICE
+
+    @classmethod
+    def _chunk_text(cls, text: str) -> list[str]:
+        cleaned = " ".join((text or "").split())
+        if not cleaned:
+            return []
+        if len(cleaned) <= cls._MAX_CHARS_PER_CHUNK:
+            return [cleaned]
+        parts = re.split(r"(?<=[.!?…。！？；;])\s+", cleaned)
+        chunks: list[str] = []
+        current = ""
+        for part in parts:
+            if not part:
+                continue
+            while len(part) > cls._MAX_CHARS_PER_CHUNK:
+                split_at = part.rfind(" ", 0, cls._MAX_CHARS_PER_CHUNK)
+                if split_at <= 0:
+                    split_at = cls._MAX_CHARS_PER_CHUNK
+                head = part[:split_at].strip()
+                if head:
+                    if current:
+                        chunks.append(current)
+                        current = ""
+                    chunks.append(head)
+                part = part[split_at:].strip()
+            if not part:
+                continue
+            candidate = f"{current} {part}".strip() if current else part
+            if len(candidate) <= cls._MAX_CHARS_PER_CHUNK:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = part
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def generate(self, text: str, **kw) -> torch.Tensor:
+        self._check_language(kw.get("language"))
+        chunks = self._chunk_text(text)
+        if not chunks:
+            raise TTSInputError(
+                "VieNeu-TTS: the input contains no speakable text — send at least one word."
+            )
+
+        import io
+        import json
+        import torchaudio
+        from services.audio_io import load_audio
+        from services.outbound_http import open_trusted_endpoint
+
+        url = self._resolve_origin()
+        voice = self._resolve_voice_name(
+            kw.get("voice"),
+            instruct=kw.get("instruct"),
+        )
+        speed = max(0.25, min(4.0, float(kw.get("speed", 1.0) or 1.0)))
+        api_key = (os.environ.get("OMNIVOICE_VIENEU_API_KEY") or "").strip()
+        auth = f"Bearer {api_key}" if api_key else None
+
+        wavs: list[torch.Tensor] = []
+        for chunk in chunks:
+            body = {
+                "model": "vieneu-v3-turbo",
+                "input": chunk,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": speed,
+            }
+            try:
+                with open_trusted_endpoint(
+                    url,
+                    method="POST",
+                    path="v1/audio/speech",
+                    body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                    content_type="application/json",
+                    authorization=auth,
+                    timeout=120,
+                ) as resp:
+                    audio_bytes = resp.read()
+            except Exception as e:
+                raise RuntimeError(
+                    f"VieNeu-TTS API call failed: {e}. "
+                    f"Ensure the server is running at {url}"
+                ) from e
+
+            wav, sr = load_audio(io.BytesIO(audio_bytes))
+            if sr != self.sample_rate:
+                wav = torchaudio.functional.resample(wav, sr, self.sample_rate)
+            if wav.ndim == 1:
+                wav = wav.unsqueeze(0)
+            elif wav.ndim == 2 and wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            wavs.append(wav)
+
+        return wavs[0] if len(wavs) == 1 else torch.cat(wavs, dim=-1)
+
+
 # ── Sherpa-ONNX adapter (universal ONNX runtime, WASM-ready) ───────────────
 
 
@@ -3452,6 +3734,7 @@ _REGISTRY: dict[str, type[TTSBackend]] = _LazyRegistry({
     "moss-tts-nano": MossTTSNanoBackend,
     # "indextts2": resolved lazily via _LAZY_REGISTRY -> engines.indextts
     "gpt-sovits":    GPTSoVITSBackend,
+    "vieneu-tts":    VieNeuTTSBackend,
     "sherpa-onnx":   SherpaOnnxBackend,
 })
 
@@ -3480,6 +3763,7 @@ _INSTALL_HINTS: dict[str, str] = {
     "moss-tts-nano": "git clone OpenMOSS/MOSS-TTS-Nano && pip install -e .  (not on PyPI)",
     "indextts2":     "git clone --branch indextts-2.5 https://github.com/index-tts/index-tts.git && cd index-tts && uv venv .venv && uv pip install --python .venv/bin/python -e .  (Windows: .venv\\Scripts\\python.exe; NOT uv sync --all-extras)",
     "gpt-sovits":    "External API server — start api_v2.py on port 9880",
+    "vieneu-tts":    "External OpenAI-compatible VieNeu-TTS server on port 8004 (OMNIVOICE_VIENEU_URL)",
     "sherpa-onnx":   "pip install sherpa-onnx  (universal ONNX runtime, WASM-ready)",
     "omnivoice-gguf":"Bundled — runs the C++ omnivoice-tts binary in bin/. Quants download lazily from Serveurperso/OmniVoice-GGUF on first generate.",
     "supertonic3":   "uv sync --extra supertonic  (CPU-only ONNX, 31 langs, ~400 MB model on first use; OpenRAIL-M model license)",
@@ -3531,6 +3815,7 @@ _ENGINE_DOCS: dict[str, str] = {
     "confucius4-tts":       "docs/engines/confucius4-tts.md",
     "indextts2":            "docs/engines/indextts.md",
     "gpt-sovits":           "docs/engines/gpt-sovits.md",
+    "vieneu-tts":           "docs/engines/vieneu-tts.md",
     "sherpa-onnx":          "docs/engines/sherpa-onnx.md",
     "supertonic3":          "docs/engines/supertonic3.md",
     "pockettts":            "docs/engines/pockettts.md",

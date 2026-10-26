@@ -43,7 +43,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from torch.nn.attention.flex_attention import create_block_mask
+try:
+    from torch.nn.attention.flex_attention import create_block_mask
+except ImportError:
+    create_block_mask = None
 from transformers import (
     AutoFeatureExtractor,
     AutoModel,

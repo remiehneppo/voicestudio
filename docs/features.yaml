@@ -45,6 +45,8 @@ tts_engines:
   - id: moss-tts-nano
     readme: MOSS-TTS-Nano
   - id: gpt-sovits
+  - id: vieneu-tts
+    doc: docs/engines/vieneu-tts.md
   - id: sherpa-onnx
   - id: indextts2
     readme: "**IndexTTS 2.5** ⚡"

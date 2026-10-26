@@ -36,6 +36,7 @@ approval), [Windows](../install/windows.md), [Linux](../install/linux.md),
 | MLX-Audio (Kokoro, CSM, Dia, …) | [mlx-audio](mlx-audio.md) | Apple Silicon | model-dependent | `pip install mlx-audio` |
 | CosyVoice 3 | [cosyvoice](cosyvoice.md) | CUDA · CPU | ✅ | clone + requirements |
 | GPT-SoVITS | [gpt-sovits](gpt-sovits.md) | external server | ✅ | its own API server |
+| VieNeu-TTS v3 Turbo | [vieneu-tts](vieneu-tts.md) | external server | ✅ | OpenAI API server on port 8004 |
 | Sherpa-ONNX | [sherpa-onnx](sherpa-onnx.md) | CUDA · CPU | — | `pip install sherpa-onnx` + model dir |
 | IndexTTS 2.5 | [indextts](indextts.md) | CUDA · CPU | ✅ + emotion | one-click sidecar install |
 | OmniVoice GGUF | [omnivoice-gguf](omnivoice-gguf.md) | CUDA · MPS · CPU | ✅ | native binary built from source (not in installers yet) |
