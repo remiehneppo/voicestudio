@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ProfileAvatar } from '@/components/profile-avatar';
+import { useEngines } from '@/hooks/use-engines';
 import type { Profile } from '@/lib/api/types';
 import { cn } from '@/lib/utils';
 import { PRESETS } from '@shared/utils/constants';
@@ -57,13 +58,25 @@ export function CastingBoard({
   onAssign: (speaker: string, profileId: string) => void;
 }) {
   const { t } = useTranslation();
-  // Automatic speaker matching is already a usable default. Keep the editor
-  // folded until someone wants to override a voice, which makes the primary
-  // upload → language → translate/generate path readable at a glance.
-  const [open, setOpen] = useState(false);
+  const { activeTts } = useEngines();
+  // Keep open by default so users immediately see their casted speakers and clone voices
+  const [open, setOpen] = useState(true);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
-  const speakers = castSpeakers(segments) as string[];
-  if (!speakers.length) return null;
+  const rawSpeakers = castSpeakers(segments) as string[];
+  const speakers = rawSpeakers.length ? rawSpeakers : (segments.length ? ['Speaker 1'] : []);
+  if (!speakers.length) {
+    return (
+      <section className="space-y-2 rounded-xl border border-border/60 bg-muted/15 p-3">
+        <h2 className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+          <span className="grid size-5 place-items-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
+            3
+          </span>
+          {t('dub.cast')}
+        </h2>
+        <p className="text-xs text-muted-foreground">{t('dub.cast_title')}</p>
+      </section>
+    );
+  }
 
   const currentVoice = (speaker: string) =>
     segments.find((segment) => segment.speaker_id === speaker)?.profile_id ||
@@ -74,6 +87,12 @@ export function CastingBoard({
       .find((part) => part.speaker_id === speaker)?.profile_id ||
     '';
 
+  const enginePresetChoices: VoiceChoice[] = (activeTts?.preset_voices || []).map((voiceName) => ({
+    value: `voice:${voiceName}`,
+    label: voiceName,
+    kind: 'preset' as const,
+  }));
+
   const baseChoices: VoiceChoice[] = [
     { value: DEFAULT_VOICE, label: t('dub.default'), kind: 'default' },
     ...profiles.map((profile) => ({
@@ -82,6 +101,7 @@ export function CastingBoard({
       kind: 'profile' as const,
       profile,
     })),
+    ...enginePresetChoices,
     ...PRESETS.map((preset) => ({
       value: `preset:${preset.id}`,
       label: t(`clone.preset_${preset.id}`),
@@ -235,6 +255,20 @@ export function CastingBoard({
                           </SelectItem>
                         ))}
                       </SelectGroup>
+                    )}
+                    {enginePresetChoices.length > 0 && (
+                      <>
+                        <SelectSeparator />
+                        <SelectGroup>
+                          <SelectLabel>{activeTts?.display_name || t('dub.default')}</SelectLabel>
+                          {enginePresetChoices.map((choice) => (
+                            <SelectItem key={choice.value} value={choice.value}>
+                              <SparklesIcon />
+                              {choice.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </>
                     )}
                     <SelectSeparator />
                     <SelectGroup>

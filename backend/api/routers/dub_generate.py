@@ -964,7 +964,11 @@ async def dub_generate(job_id: str, req: DubRequest):
                 # collide with persistent voice_profiles.id values.
                 # Wave 3.2: a per-segment clone ref (cut from this line's own
                 # source audio) takes precedence over the per-speaker clone.
-                if profile_id and profile_id.startswith("auto-seg:"):
+                voice_name = None
+                if profile_id and profile_id.startswith("voice:"):
+                    voice_name = profile_id[len("voice:"):]
+                    profile_id = None
+                elif profile_id and profile_id.startswith("auto-seg:"):
                     sid = profile_id[len("auto-seg:"):]
                     info = (job.get("segment_clones") or {}).get(sid)
                     # voice_match="consistent": an auto-seg binding to the
@@ -1095,6 +1099,7 @@ async def dub_generate(job_id: str, req: DubRequest):
                         "language": lang if lang != "Auto" else None,
                         "ref_audio": ref_audio,
                         "ref_text": ref_text,
+                        "voice": voice_name,
                         "cache_ref": not ref_single_use,
                         "instruct": instruct_str if instruct_str else None,
                         "duration": dur_s,
@@ -1111,6 +1116,7 @@ async def dub_generate(job_id: str, req: DubRequest):
                     audio_out = backend.generate(
                         text=text, language=lang if lang != "Auto" else None,
                         ref_audio=ref_audio, ref_text=ref_text,
+                        voice=voice_name,
                         cache_ref=not ref_single_use,
                         instruct=instruct_str if instruct_str else None,
                         duration=dur_s, num_step=nstep, guidance_scale=cfg,
@@ -1152,6 +1158,7 @@ async def dub_generate(job_id: str, req: DubRequest):
                         audio_out = backend.generate(
                             text=text, language=lang if lang != "Auto" else None,
                             ref_audio=ref_audio, ref_text=ref_text,
+                            voice=voice_name,
                             cache_ref=not ref_single_use,
                             instruct=instruct_str if instruct_str else None,
                             duration=dur_s, num_step=retry_steps, guidance_scale=cfg,
@@ -2008,7 +2015,11 @@ async def preview_segment(job_id: str, req: SegmentPreviewRequest):
 
         # Resolve profile / auto-clone
         pid = req.profile_id
-        if pid and pid.startswith("auto:"):
+        voice_name = None
+        if pid and pid.startswith("voice:"):
+            voice_name = pid[len("voice:"):]
+            pid = None
+        elif pid and pid.startswith("auto:"):
             key = pid[len("auto:"):]
             info = None
             if (
@@ -2052,6 +2063,7 @@ async def preview_segment(job_id: str, req: SegmentPreviewRequest):
             language=lang,
             ref_audio=ref_audio,
             ref_text=ref_text,
+            voice=voice_name,
             instruct=instruct_str if instruct_str else None,
             duration=req.duration,
             num_step=8,  # fast preview
